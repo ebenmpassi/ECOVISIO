@@ -1,1 +1,0 @@
-// Affiche une carte intéractive.

@@ -1,1 +1,0 @@
-//Gère les clics "Pleine"/"Vide" et envoie les annotations au serveur.
