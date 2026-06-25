@@ -13,6 +13,7 @@ Deux tables :
 import os
 import sqlite3
 from datetime import datetime
+import hashlib
 
 DB_NAME = "smartwaste.db"
 
@@ -36,6 +37,16 @@ def init_db():
     """Crée les tables si elles n'existent pas encore."""
     conn = get_connection()
     cur = conn.cursor()
+    
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            salt BLOB NOT NULL,
+            hash BLOB NOT NULL,
+            role TEXT NOT NULL CHECK(role IN('admin', 'agent'))
+            )
+        """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS poubelles (
@@ -169,6 +180,56 @@ def _inserer_seuils_par_defaut():
         conn.commit()
     conn.close()
 
+
+def hash_mot_de_passe(mot_de_passe, salt=None):
+    if salt is None:
+        salt = os.urandom(16)  # 16 bytes aléatoires
+
+    hash_bytes = hashlib.pbkdf2_hmac(
+        'sha256',
+        mot_de_passe.encode(),
+        salt,
+        100000  # nombre d’itérations (sécurité)
+    )
+
+    return salt, hash_bytes
+
+def creer_compte(username, mot_de_passe, role="agent"):
+    salt, hash_bytes = hash_mot_de_passe(mot_de_passe)
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO accounts (username, salt, hash, role) VALUES (?, ?, ?, ?)",
+            (username, salt, hash_bytes, role)
+        )
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        conn.close()
+
+def verifier_compte(username, mot_de_passe):
+    conn = get_connection()
+    user = conn.execute(
+        "SELECT * FROM accounts WHERE username = ?",
+        (username,)
+    ).fetchone()
+    conn.close()
+
+    if user is None:
+        return None
+
+    salt = user["salt"]
+    hash_stocke = user["hash"]
+
+    _, hash_test = hash_mot_de_passe(mot_de_passe, salt)
+
+    if hash_test == hash_stocke:
+        return user
+
+    return None
 
 def get_seuils():
     """Retourne les seuils actuels sous forme de dict."""

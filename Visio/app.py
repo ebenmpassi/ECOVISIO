@@ -29,7 +29,7 @@ from flask import (
 from database import (
     init_db, get_poubelle, lister_poubelles, ajouter_signalement,
     desactiver_poubelle, reactiver_poubelle,
-    ajouter_poubelle,
+    ajouter_poubelle,verifier_compte,creer_compte,
     LABELS_VALIDES, LABEL_AFFICHAGE,
     verifier_limite, enregistrer_tentative, nettoyer_vieilles_tentatives,
     LIMITE_UPLOADS, FENETRE_MINUTES,
@@ -831,6 +831,25 @@ def login_requis(f):
         return f(*args, **kwargs)
     return wrapper
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    erreur = None
+
+    if request.method == "POST":
+        username = request.form.get("username")
+        mot_de_passe = request.form.get("mot_de_passe")
+
+        user = verifier_compte(username, mot_de_passe)
+
+        if user:
+            session["agent_connecte"] = True
+            session["username"] = username
+            session["role"] = user["role"]
+            return redirect(url_for("dashboard"))
+        else:
+            erreur = "Identifiants incorrects."
+
+    return render_template_string(PAGE_LOGIN, erreur=erreur)
 
 PAGE_LOGIN = """
 <!doctype html>
@@ -860,9 +879,14 @@ PAGE_LOGIN = """
       <h1>Espace agents</h1>
       <p>Réservé aux services de collecte</p>
       <form method="post">
-        <input type="password" name="mot_de_passe" placeholder="Mot de passe" required autofocus>
-        <button class="btn btn-p" type="submit">Se connecter</button>
+          <input name="username" placeholder="Nom d'utilisateur" required>
+          <input type="password" name="mot_de_passe" placeholder="Mot de passe" required>
+          <button class="btn btn-p" type="submit">Se connecter</button>
       </form>
+      <p style="text-align:center;margin-top:1rem">
+          <a href="{{ url_for('register') }}">Créer un compte</a>
+      </p>
+
       {% if erreur %}<div class="err">{{ erreur }}</div>{% endif %}
     </div>
     <a href="{{ url_for('accueil') }}">Retour à l'accueil</a>
@@ -871,22 +895,163 @@ PAGE_LOGIN = """
 """
 
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    erreur = None
-    if request.method == "POST":
-        if request.form.get("mot_de_passe") == MOT_DE_PASSE_AGENTS:
-            session["agent_connecte"] = True
-            return redirect(url_for("dashboard"))
-        erreur = "Mot de passe incorrect."
-    return render_template_string(PAGE_LOGIN, erreur=erreur)
-
-
 @app.route("/logout")
 def logout():
     session.pop("agent_connecte", None)
     return redirect(url_for("accueil"))
 
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    erreur = None
+    succes = None
+
+    if request.method == "POST":
+        username = request.form.get("username")
+        mot_de_passe = request.form.get("mot_de_passe")
+        role = request.form.get("role")
+
+        if creer_compte(username, mot_de_passe, role):
+            succes = "Compte créé"
+        else:
+            erreur = "Utilisateur déjà existant"
+
+    return render_template_string(PAGE_REGISTER, erreur=erreur, succes=succes)
+
+def role_requis(role):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            if not session.get("agent_connecte"):
+                return redirect(url_for("login"))
+
+            if session.get("role") != role:
+                abort(403)
+
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# ====================== PAGE REGISTER ======================
+PAGE_REGISTER = """
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Créer un compte — Visio</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+__THEME_AGENT__
+.center-screen{
+  min-height:100vh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:1rem
+}
+.login-card{ width:100%; max-width:380px }
+.login-card h1{ text-align:center; font-size:1.2rem; margin:0 0 .3rem }
+.login-card p{ text-align:center; color:var(--brume); font-size:.88rem; margin:0 0 1.2rem }
+input{
+  width:100%;box-sizing:border-box;padding:.8rem;margin:.4rem 0;
+  border:1px solid #ffffff2a;border-radius:10px;font-size:1rem;
+  background:#ffffff0f;color:var(--crayon)
+}
+input::placeholder{ color:#ffffff66 }
+input:focus{ outline:none; border-color:var(--signal) }
+.login-card button{ width:100%; margin-top:.5rem }
+.err{ color:#ff9a8a; text-align:center; margin-top:.6rem; font-size:.9rem }
+.msg{ color:#7CFFB2; text-align:center; margin-top:.6rem; font-size:.9rem }
+
+/* ===== MENU DÉROULANT PERSONNALISÉ VISIO (100% stylé, bords arrondis partout) ===== */
+.vselect{ position:relative; margin:.4rem 0; user-select:none }
+.vselect-trigger{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:.8rem;border:1px solid #ffffff2a;border-radius:10px;
+  background:#ffffff0f;color:var(--crayon);cursor:pointer;font-size:1rem;
+  transition:border-color .15s
+}
+.vselect.open .vselect-trigger{ border-color:var(--signal) }
+.vselect-trigger .fleche{
+  width:10px;height:10px;border-right:2px solid var(--brume);border-bottom:2px solid var(--brume);
+  transform:rotate(45deg);transition:transform .2s;margin-left:.5rem;flex:none
+}
+.vselect.open .vselect-trigger .fleche{ transform:rotate(-135deg) }
+.vselect-menu{
+  position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:30;
+  background:#1c3f31;border:1px solid #ffffff2a;border-radius:12px;
+  padding:.3rem;box-shadow:0 12px 30px -8px #000a;
+  opacity:0;transform:translateY(-6px);pointer-events:none;
+  transition:opacity .15s,transform .15s
+}
+.vselect.open .vselect-menu{ opacity:1; transform:none; pointer-events:auto }
+.vselect-option{ padding:.6rem .7rem;border-radius:8px;cursor:pointer;transition:background .12s }
+.vselect-option:hover{ background:#ffffff14 }
+.vselect-option.selected{ background:var(--mousse);color:var(--crayon);font-weight:600 }
+.vselect-option.selected::after{  color:var(--signal) }
+</style>
+</head>
+<body>
+  <div class="center-screen wrap">
+    <div class="carte login-card">
+      <h1>Créer un compte</h1>
+      <p>Accès réservé aux agents autorisés</p>
+      <form method="post">
+        <input name="username" placeholder="Nom d'utilisateur" required>
+        <input type="password" name="mot_de_passe" placeholder="Mot de passe" required>
+
+        <!-- Menu déroulant personnalisé : la valeur soumise est dans l'input caché 'role' -->
+        <div class="vselect" id="vselect-role">
+          <input type="hidden" name="role" value="agent">
+          <div class="vselect-trigger">
+            <span class="vselect-label">Agent</span>
+            <span class="fleche"></span>
+          </div>
+          <div class="vselect-menu">
+            <div class="vselect-option selected" data-value="agent">Agent</div>
+            <div class="vselect-option" data-value="admin">Administrateur</div>
+          </div>
+        </div>
+
+        <button class="btn btn-p" type="submit">Créer un compte</button>
+      </form>
+      {% if erreur %}<div class="err">{{ erreur }}</div>{% endif %}
+      {% if succes %}<div class="msg">{{ succes }}</div>{% endif %}
+      <p style="margin-top:1rem">
+        <a href="{{ url_for('login') }}">Déjà un compte ? Se connecter</a>
+      </p>
+    </div>
+    <a href="{{ url_for('accueil') }}">Retour à l'accueil</a>
+  </div>
+
+  <script>
+    // Composant menu déroulant réutilisable : marche pour tout élément .vselect de la page
+    document.querySelectorAll('.vselect').forEach(function(vs){
+      const trigger = vs.querySelector('.vselect-trigger');
+      const label   = vs.querySelector('.vselect-label');
+      const hidden  = vs.querySelector('input[type=hidden]');
+      const options = vs.querySelectorAll('.vselect-option');
+
+      trigger.addEventListener('click', function(e){
+        e.stopPropagation();
+        document.querySelectorAll('.vselect.open').forEach(function(o){ if(o!==vs) o.classList.remove('open'); });
+        vs.classList.toggle('open');
+      });
+      options.forEach(function(opt){
+        opt.addEventListener('click', function(){
+          options.forEach(function(o){ o.classList.remove('selected'); });
+          opt.classList.add('selected');
+          label.textContent = opt.textContent;
+          hidden.value = opt.dataset.value;
+          vs.classList.remove('open');
+        });
+      });
+    });
+    document.addEventListener('click', function(){
+      document.querySelectorAll('.vselect.open').forEach(function(o){ o.classList.remove('open'); });
+    });
+  </script>
+</body>
+</html>
+"""
 
 # ====================== DASHBOARD AGENTS (Point 5) ======================
 PAGE_DASHBOARD = """
@@ -925,11 +1090,13 @@ PAGE_DASHBOARD = """
     <div class="marque">Visio</div>
     <div class="topnav-actions">
       <a href="{{ url_for('poubelles') }}">Poubelles</a>
+      <a href="{{ url_for('admin_regles') }}">Configurer les règles</a>
+      {% if session.get("role") == "admin" %}
       <a href="{{ url_for('caracteristiques') }}">Caractéristiques</a>
       <a href="{{ url_for('etiqueter') }}">Jeu de test</a>
       <a href="{{ url_for('evaluation_page') }}">Résultats</a>
       <a href="{{ url_for('calibration_page') }}">Calibration</a>
-      <a href="{{ url_for('admin_regles') }}">Configurer les règles</a>
+      {% endif %}
       <a class="out" href="{{ url_for('logout') }}">Déconnexion</a>
     </div>
   </div>
@@ -1223,10 +1390,12 @@ PAGE_ADMIN_REGLES = """
 @login_requis
 def admin_regles():
     message = request.args.get("msg")
+    
     return render_template_string(
         PAGE_ADMIN_REGLES,
         seuils=get_seuils(),
-        regles=lister_regles(),        caracteristiques=CARACTERISTIQUES_REGLES,
+        regles=lister_regles(),        
+        caracteristiques=CARACTERISTIQUES_REGLES,
         operateurs=OPERATEURS_REGLES,
         message=message,
     )
@@ -2005,3 +2174,5 @@ _injecter_themes()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
+
