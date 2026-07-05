@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 from database import LABEL_AFFICHAGE
 
-# Palette cohérente avec l'identité Visio
+# Palette cohérente avec l'identité ecoVisio
 COULEURS = {"vide": "#2e8b57", "a_moitie": "#e0a83e", "pleine": "#e0573e", "inconnu": "#5b6e63"}
 VERT_SIGNAL = "#5bbf3a"
 FORET = "#14352a"
@@ -103,6 +103,56 @@ def distribution_tailles_png(tailles_octets):
         ax.text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
         ax.axis("off")
     ax.set_title("Distribution des tailles de fichiers")
+    return _png(fig)
+
+
+def nuage_contours_texture_png(points_par_classe):
+    """
+    Nuage de points : densité de contours (x) vs texture (y), coloré par classe.
+    Montre visuellement comment les classes se séparent dans l'espace des features.
+    points_par_classe = dict {classe: [(contours, texture), ...]}
+    """
+    fig, ax = plt.subplots(figsize=(5.5, 4.2))
+    a_des_donnees = False
+    for classe, points in points_par_classe.items():
+        if points:
+            a_des_donnees = True
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            ax.scatter(xs, ys, label=LABEL_AFFICHAGE.get(classe, classe),
+                       color=COULEURS.get(classe, "#888"), s=60,
+                       edgecolors="#14352a", alpha=0.8)
+    if a_des_donnees:
+        ax.set_xlabel("Densité de contours")
+        ax.set_ylabel("Texture (variance du Laplacien)")
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+        ax.axis("off")
+    ax.set_title("Séparation des classes (contours vs texture)")
+    return _png(fig)
+
+
+def distribution_contraste_png(contrastes_par_classe):
+    """
+    Histogramme superposé du contraste par classe.
+    contrastes_par_classe = dict {classe: [valeurs de contraste...]}
+    """
+    fig, ax = plt.subplots(figsize=(5.5, 3.6))
+    a_des_donnees = any(contrastes_par_classe.values())
+    if a_des_donnees:
+        for classe, valeurs in contrastes_par_classe.items():
+            if valeurs:
+                ax.hist(valeurs, bins=10, alpha=0.6,
+                        label=LABEL_AFFICHAGE.get(classe, classe),
+                        color=COULEURS.get(classe, "#888"), edgecolor="#14352a")
+        ax.set_xlabel("Contraste")
+        ax.set_ylabel("Nombre d'images")
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+        ax.axis("off")
+    ax.set_title("Distribution du contraste par classe")
     return _png(fig)
 
 

@@ -140,9 +140,11 @@ def init_db():
     # Étiqueté à la main par l'agent, séparé des signalements citoyens.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS jeu_test (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            chemin_image TEXT NOT NULL UNIQUE,
-            vrai_label   TEXT
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            chemin_image  TEXT NOT NULL UNIQUE,
+            vrai_label    TEXT,
+            features_json TEXT,
+            verdict_cache TEXT
         )
     """)
 
@@ -267,6 +269,8 @@ def reinitialiser_seuils():
 CARACTERISTIQUES_REGLES = (
     "densite_contours", "texture", "contraste",
     "luminosite_moyenne", "taille_fichier",
+    # Critères de débordement (déchets au sol)
+    "densite_contours_bas", "taches_claires_bas", "diversite_couleurs",
 )
 OPERATEURS_REGLES = (">", "<", ">=", "<=")
 
@@ -359,6 +363,28 @@ def etiqueter_jeu_test(item_id, label):
         raise ValueError(f"Label invalide : {label}")
     conn = get_connection()
     conn.execute("UPDATE jeu_test SET vrai_label = ? WHERE id = ?", (label, item_id))
+    conn.commit()
+    conn.close()
+
+
+def cacher_analyse_jeu_test(item_id, features_json, verdict):
+    """
+    Mémorise les caractéristiques et le verdict calculés pour une image du jeu
+    de test, afin de ne pas refaire l'analyse à chaque affichage des résultats.
+    """
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jeu_test SET features_json = ?, verdict_cache = ? WHERE id = ?",
+        (features_json, verdict, item_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def vider_cache_jeu_test():
+    """Efface le cache d'analyse (à appeler si l'extraction d'image change)."""
+    conn = get_connection()
+    conn.execute("UPDATE jeu_test SET features_json = NULL, verdict_cache = NULL")
     conn.commit()
     conn.close()
 
@@ -558,13 +584,14 @@ def derniers_signalements(poubelle_id, n=5):
     return rows
 
 
-def statut_actuel_poubelle(poubelle_id, n=5):
+def calculer_statut(rows):
     """
-    Calcule le statut "actuel" d'une poubelle par VOTE des n derniers signalements.
-    En cas d'égalité, le signalement le plus récent tranche.
-    Retourne un label (vide / a_moitie / pleine) ou None si aucun signalement.
+    Détermine le statut actuel d'une poubelle à partir de signalements DÉJÀ
+    récupérés (aucun accès à la base de données ici).
+
+    Statut = vote majoritaire des signalements ; en cas d'égalité, le plus
+    récent tranche. Retourne un label ou None.
     """
-    rows = derniers_signalements(poubelle_id, n)
     if not rows:
         return None
 
@@ -578,14 +605,24 @@ def statut_actuel_poubelle(poubelle_id, n=5):
         return None
 
     max_votes = max(votes.values())
-    gagnants = [lbl for lbl, v in votes.items() if v == max_votes]
+    gagnants = [lbl for lbl, nb in votes.items() if nb == max_votes]
     if len(gagnants) == 1:
         return gagnants[0]
-    # égalité -> le plus récent parmi les gagnants
+    # Égalité : le plus récent parmi les gagnants tranche
     for r in rows:
         if r["statut"] in gagnants:
             return r["statut"]
     return gagnants[0]
+
+
+def statut_actuel_poubelle(poubelle_id, n=5):
+    """
+    Calcule le statut "actuel" d'une poubelle par VOTE des n derniers signalements.
+    En cas d'égalité, le signalement le plus récent tranche.
+    Retourne un label (vide / pleine) ou None si aucun signalement.
+    """
+    rows = derniers_signalements(poubelle_id, n)
+    return calculer_statut(rows)
 
 
 def compter_signalements():
@@ -610,16 +647,17 @@ def donnees_carte(n=5):
     poubelles = lister_poubelles()
     data = []
     for p in poubelles:
-        statut = statut_actuel_poubelle(p["id"], n)
-        # Date du dernier signalement (pour info au survol)
-        dern = derniers_signalements(p["id"], 1)
-        derniere_maj = dern[0]["date_upload"] if dern else None
+        # Une seule requête par poubelle : on récupère les n derniers signalements
+        # et on réutilise ces lignes pour le statut ET la date (au lieu de 2 requêtes).
+        rows = derniers_signalements(p["id"], n)
+        statut = calculer_statut(rows)
+        derniere_maj = rows[0]["date_upload"] if rows else None
         data.append({
             "id": p["id"],
             "nom_lieu": p["nom_lieu"],
             "latitude": p["latitude"],
             "longitude": p["longitude"],
-            "statut": statut,            # 'vide' / 'a_moitie' / 'pleine' / None
+            "statut": statut,            # 'vide' / 'pleine' / None
             "derniere_maj": derniere_maj,
         })
     return data

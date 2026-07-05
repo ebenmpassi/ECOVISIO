@@ -109,10 +109,16 @@ def lancer_evaluation():
     Parcourt le jeu de test étiqueté (table jeu_test), fait tourner la
     classification sur chaque image, et renvoie les métriques + le détail.
 
-    Renvoie (metriques, details) où details liste chaque image avec
-    son vrai label, le verdict, et si c'est correct.
+    Optimisation : l'extraction des caractéristiques (coûteuse) est mise en
+    cache lors du premier passage. Aux affichages suivants, on relit les
+    caractéristiques depuis la base et on ne refait que la classification
+    (très rapide), ce qui évite de réanalyser les photos à chaque chargement.
+
+    Renvoie (metriques, details).
     """
-    from database import lister_jeu_test
+    import json
+    from database import lister_jeu_test, cacher_analyse_jeu_test
+    from vision import extraire_caracteristiques, classifier_par_regles, verifier_conformite
 
     items = lister_jeu_test()
     verites, predictions, details = [], [], []
@@ -120,23 +126,44 @@ def lancer_evaluation():
     for it in items:
         chemin = it["chemin_image"]
         vrai = it["vrai_label"]
-        if not os.path.exists(chemin):
-            continue
-        try:
-            res = analyser_image(chemin)
-        except Exception:
-            continue
+        if vrai is None:
+            continue  # pas encore étiquetée
 
-        # On évalue uniquement les images conformes (sinon pas de verdict)
-        if not res["conforme"]:
+        # 1) Caractéristiques : depuis le cache si disponible, sinon calcul unique
+        features = None
+        if it["features_json"]:
+            try:
+                features = json.loads(it["features_json"])
+            except (ValueError, TypeError):
+                features = None
+
+        # Si le cache est périmé (anciennes caractéristiques sans les nouveaux
+        # critères de débordement), on force le recalcul.
+        if features is not None and "taches_claires_bas" not in features:
+            features = None
+
+        if features is None:
+            if not os.path.exists(chemin):
+                continue
+            try:
+                features = extraire_caracteristiques(chemin)
+            except Exception:
+                continue
+            # Mémorisation pour les prochains affichages (évite de réanalyser)
+            cacher_analyse_jeu_test(it["id"], json.dumps(features, ensure_ascii=False), None)
+
+        # 2) Conformité + classification : étape rapide, refaite à chaque fois
+        #    pour refléter d'éventuels nouveaux seuils après calibration.
+        conforme, raison = verifier_conformite(features)
+        if not conforme:
             details.append({
                 "id": it["id"], "nom": os.path.basename(chemin),
                 "vrai": vrai, "predit": None, "correct": False,
-                "note": "non conforme : " + (res["raison_rejet"] or ""),
+                "note": "non conforme : " + (raison or ""),
             })
             continue
 
-        pred = res["verdict"]
+        pred, _ = classifier_par_regles(features)
         verites.append(vrai)
         predictions.append(pred)
         details.append({

@@ -18,6 +18,7 @@ import os
 import json
 import numpy as np
 import cv2
+from PIL import Image
 
 from database import NIVEAU_VERS_LABEL
 
@@ -25,6 +26,27 @@ from database import NIVEAU_VERS_LABEL
 # =========================================================
 # POINT 3 — EXTRACTION DES CARACTÉRISTIQUES
 # =========================================================
+
+def compresser_image(chemin_image, qualite=75, largeur_max=1024, hauteur_max=1024):
+    """
+    Réduit automatiquement le poids de l'image (optimisation Green IT / stockage).
+
+    - Redimensionne les très grandes images (au plus largeur_max x hauteur_max).
+    - Compresse le JPEG (qualité ajustable).
+    - Réécrit directement le fichier sur le disque.
+
+    Échec gracieux : si la compression échoue, on garde l'image d'origine.
+    """
+    try:
+        img = Image.open(chemin_image)
+        img.thumbnail((largeur_max, hauteur_max))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.save(chemin_image, optimize=True, quality=qualite)
+    except Exception:
+        # En cas d'échec, on laisse l'image originale intacte.
+        pass
+
 
 def extraire_caracteristiques(chemin_image):
     """
@@ -80,6 +102,36 @@ def extraire_caracteristiques(chemin_image):
     hist_bleu = histogramme_8bins(b)
     hist_luminance = histogramme_8bins(gris)
 
+    # --- Critères de DÉBORDEMENT (sans ML) ---
+    # Idée : une poubelle qui déborde laisse des déchets éparpillés AU SOL,
+    # surtout visible dans le bas de l'image. On mesure trois indices.
+
+    # 1) Densité de contours dans le tiers INFÉRIEUR (la zone du sol).
+    #    Beaucoup de contours en bas = déchets au sol = débordement probable.
+    debut_bas = int(hauteur * 2 / 3)
+    contours_bas_zone = cv2.Canny(gris[debut_bas:, :], 100, 200)
+    densite_contours_bas = round(
+        float(np.count_nonzero(contours_bas_zone) / max(contours_bas_zone.size, 1)), 4
+    )
+
+    # 2) Diversité des couleurs : nombre de teintes distinctes significatives.
+    #    Une scène propre a peu de couleurs ; des déchets multicolores en ajoutent.
+    #    On quantifie la teinte (canal H du HSV) en 16 paliers et on compte
+    #    combien de paliers représentent chacun au moins 2% des pixels.
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    teinte = hsv[:, :, 0]
+    hist_teinte = cv2.calcHist([teinte], [0], None, [16], [0, 180]).flatten()
+    hist_teinte = hist_teinte / max(hist_teinte.sum(), 1)
+    diversite_couleurs = int(np.count_nonzero(hist_teinte >= 0.02))
+
+    # 3) Taches claires sur fond sombre : proportion de pixels très clairs
+    #    dans le bas de l'image (sacs, papiers, emballages qui ressortent au sol).
+    bas_gris = gris[debut_bas:, :]
+    seuil_clair = 180  # niveau de gris au-delà duquel on considère "clair"
+    taches_claires_bas = round(
+        float(np.count_nonzero(bas_gris > seuil_clair) / max(bas_gris.size, 1)), 4
+    )
+
     return {
         "largeur": largeur,
         "hauteur": hauteur,
@@ -93,6 +145,10 @@ def extraire_caracteristiques(chemin_image):
         "histogramme_vert": hist_vert,
         "histogramme_bleu": hist_bleu,
         "histogramme_luminance": hist_luminance,
+        # Nouveaux critères de débordement
+        "densite_contours_bas": densite_contours_bas,
+        "diversite_couleurs": diversite_couleurs,
+        "taches_claires_bas": taches_claires_bas,
     }
 
 
