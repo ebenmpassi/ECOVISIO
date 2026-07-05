@@ -28,10 +28,10 @@ import base64
 import requests
 
 # Clé API : de préférence via variable d'environnement, sinon en dur ici.
-CLE_API_VISION = "AIzaSyD6eqi6oFq6lcID0xx78Fw_OZBn_XSI9Sk"
+CLE_API_VISION = os.environ.get("GOOGLE_VISION_API_KEY", "")
 
 API_URL = "https://vision.googleapis.com/v1/images:annotate"
-TIMEOUT = 2  # secondes
+TIMEOUT = 8  # secondes
 
 # Termes (en anglais, car Vision répond en anglais) qui indiquent une poubelle.
 # On teste en minuscules, en cherchant ces mots dans les labels retournés.
