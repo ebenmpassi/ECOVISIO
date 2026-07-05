@@ -23,7 +23,7 @@ from werkzeug.utils import secure_filename
 from functools import wraps
 from flask import (
     Flask, request, redirect, url_for,
-    render_template_string, abort, send_from_directory, session,
+    render_template_string, abort, send_from_directory, session, jsonify,
 )
 
 from database import (
@@ -40,13 +40,20 @@ from database import (
     CARACTERISTIQUES_REGLES, OPERATEURS_REGLES,
     importer_images_jeu_test, lister_jeu_test, prochain_jeu_test_non_etiquete,
     etiqueter_jeu_test, compter_jeu_test, vider_jeu_test,
+    cacher_analyse_jeu_test,
     correlation_jour_semaine, correlation_meteo,
 )
-from vision import analyser_image, comparer_citoyen_ia
+from vision import (
+    analyser_image,
+    comparer_citoyen_ia,
+    compresser_image,
+)
+from reconnaissance import analyser_avec_vision
 from evaluation import lancer_evaluation
 import graphiques
 from meteo import get_meteo, jour_de_semaine
 from calibration import proposer_seuils
+from verification import lancer_verification_complete
 
 # --- Configuration ---
 DOSSIER_UPLOADS = "uploads"
@@ -166,7 +173,7 @@ THEME_CITOYEN = PALETTE + """
 # ====================== PAGE D'ACCUEIL (vitrine animée) ======================
 PAGE_ACCUEIL = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Visio — Prévention des dépôts sauvages</title>
+<html lang="fr"><head><meta charset="utf-8"><title>ecoVisio — Prévention des dépôts sauvages</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{
@@ -213,7 +220,9 @@ PAGE_ACCUEIL = """
   .btn svg{width:18px;height:18px}
 
   /* --- Scène animée (signature) --- */
-  .scene{position:relative;height:340px;opacity:0;animation:fade 1s .5s forwards}
+  .scene{position:relative;opacity:0;animation:fade 1s .5s forwards;
+    display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .scene #scene-svg{max-height:220px}
   @keyframes fade{to{opacity:1}}
 
   /* --- Bandeau chiffres / valeur --- */
@@ -237,7 +246,11 @@ PAGE_ACCUEIL = """
 <div class="wrap">
 
   <nav>
-    <div class="marque">Visio<span> · suivi des poubelles</span></div>
+    <div class="marque">
+      <img src="{{ url_for('static', filename='logo.png') }}" alt="ecoVisio"
+           style="height:38px;vertical-align:middle;border-radius:6px">
+      <span style="margin-left:.5rem"> · suivi des poubelles</span>
+    </div>
     <div>
       <a href="{{ url_for('dashboard') }}">Espace agents</a>
       <a href="{{ url_for('equipe') }}">Équipe</a>
@@ -264,8 +277,10 @@ PAGE_ACCUEIL = """
       </div>
     </div>
 
-    <!-- SIGNATURE : scène animée maison -->
+    <!-- Logo + SIGNATURE : scène animée maison -->
     <div class="scene" aria-hidden="true">
+      <img src="{{ url_for('static', filename='logo.png') }}" alt="ecoVisio"
+           style="display:block;width:100%;max-width:280px;margin:0 auto 1rem">
       <svg id="scene-svg" viewBox="0 0 420 340" width="100%" height="100%"></svg>
     </div>
   </header>
@@ -391,7 +406,7 @@ PAGE_ACCUEIL = """
 # ====================== PAGE ÉQUIPE ======================
 PAGE_EQUIPE = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Équipe — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Équipe — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{--foret:#14352a;--signal:#7ed957;--brume:#cfe3d4;--crayon:#eef5ef}
@@ -418,12 +433,12 @@ PAGE_EQUIPE = """
 <body>
 <div class="wrap">
   <nav>
-    <div class="marque">Visio</div>
+    <div class="marque">ecoVisio</div>
     <div><a href="{{ url_for('accueil') }}">Retour à l'accueil</a></div>
   </nav>
 
   <h1>L'équipe du projet</h1>
-  <p class="intro">Le projet Visio a été conçu et réalisé dans le cadre du
+  <p class="intro">Le projet ecoVisio a été conçu et réalisé dans le cadre du
     Master Camp D.</p>
 
   <div class="grille">
@@ -521,7 +536,7 @@ PAGE_SIGNALER = """
 <div class="wrap">
   <div class="topbar">
     <svg class="leaf" viewBox="0 0 24 24" fill="none" stroke="#2f5d3f" stroke-width="2"><path d="M12 2C8 6 6 9 6 13a6 6 0 0012 0c0-4-2-7-6-11z"/></svg>
-    <span class="marque">Visio</span>
+    <span class="marque">ecoVisio</span>
   </div>
 
   <div class="carte" style="margin-bottom:1.2rem">
@@ -574,7 +589,7 @@ PAGE_SIGNALER = """
 # ====================== PAGE DE CONFIRMATION ======================
 PAGE_MERCI = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Signalement enregistré — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Signalement enregistré — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_CITOYEN__
   .center{text-align:center}
@@ -590,6 +605,9 @@ PAGE_MERCI = """
   .alerte{display:flex;align-items:center;gap:.6rem;background:#fdecea;border:1px solid #f5c6bf;
     color:#a3261a;padding:.8rem 1rem;border-radius:12px;font-weight:600;margin-top:1rem;font-size:.92rem}
   .alerte svg{width:20px;height:20px;flex:none;stroke:#a3261a}
+  .avert-vision{display:flex;align-items:center;gap:.6rem;background:#fff6e5;border:1px solid #f0d8a0;
+    color:#7a5a12;padding:.8rem 1rem;border-radius:12px;margin-top:1rem;font-size:.88rem;text-align:left}
+  .avert-vision svg{width:20px;height:20px;flex:none;stroke:#b9871a}
 </style></head>
 <body>
 <div class="wrap">
@@ -601,7 +619,7 @@ PAGE_MERCI = """
     <div class="res">
       <div class="row"><span class="lab">Votre évaluation</span>
         <span class="badge b_{{ eval_citoyen }}">{{ aff[eval_citoyen] }}</span></div>
-      <div class="row"><span class="lab">Analyse Visio</span>
+      <div class="row"><span class="lab">Analyse ecoVisio</span>
         <span class="badge b_{{ verdict_ia }}">{{ aff[verdict_ia] }}</span></div>
       <div class="row"><span class="lab">Résultat</span>
         {% if accord %}<span class="accord">Évaluation confirmée</span>
@@ -611,6 +629,12 @@ PAGE_MERCI = """
       <div class="alerte">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 13.8A2 2 0 004 21h16a2 2 0 001.7-3.3l-8-13.8a2 2 0 00-3.4 0z"/></svg>
         Poubelle pleine — alerte transmise aux services de collecte
+      </div>
+    {% endif %}
+    {% if avertissement_vision %}
+      <div class="avert-vision">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+        {{ avertissement_vision }}
       </div>
     {% endif %}
     <p style="margin-top:1.5rem"><a href="{{ url_for('accueil') }}">Retour à l'accueil</a></p>
@@ -623,7 +647,7 @@ PAGE_MERCI = """
 # ====================== PAGE DE REJET (photo non conforme) ======================
 PAGE_REJET = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Photo non conforme — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Photo non conforme — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_CITOYEN__
   .center{text-align:center}
@@ -660,7 +684,7 @@ PAGE_REJET = """
 # ====================== PAGE LIMITE DÉPASSÉE (anti-spam) ======================
 PAGE_LIMITE = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Trop de signalements — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Trop de signalements — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_CITOYEN__
   .center{text-align:center}
@@ -695,7 +719,7 @@ PAGE_LIMITE = """
 # ====================== PAGE POUBELLE RETIRÉE (désactivée) ======================
 PAGE_POUBELLE_RETIREE = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Poubelle retirée — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Poubelle retirée — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_CITOYEN__
   .center{text-align:center}
@@ -766,6 +790,7 @@ def signaler(id_poubelle):
         nom_sauvegarde = secure_filename(f"{id_poubelle}_{horodatage}.{ext}")
         chemin = os.path.join(DOSSIER_UPLOADS, nom_sauvegarde)
         fichier.save(chemin)
+        compresser_image(chemin)
 
         # 4) Analyse IA : conformité (qualité) PUIS niveau (Points 3 + 4)
         res = analyser_image(chemin)
@@ -779,6 +804,23 @@ def signaler(id_poubelle):
                 pass
             return render_template_string(
                 PAGE_REJET, poubelle=poubelle, raison=res["raison_rejet"],
+            )
+
+        # 4ter) Reconnaissance d'objet (Google Vision) : la photo montre-t-elle
+        # bien une poubelle ? MODE SOUPLE : on n'appelle Vision que sur les photos
+        # déjà conformes, et si aucune poubelle n'est détectée, on NE rejette PAS —
+        # on enregistre quand même le signalement et on affiche un simple
+        # avertissement. Raison : la reconnaissance d'objet n'est pas fiable à 100 %
+        # (une vraie poubelle, si elle est lointaine ou noyée dans la scène, peut ne
+        # pas être détectée). Le QR code reste le garde-fou principal.
+        # Échec gracieux : si Vision est indisponible (pas de clé, réseau...), pas d'avertissement.
+        vision_res = analyser_avec_vision(chemin)
+        avertissement_vision = None
+        if vision_res["disponible"] and not vision_res["est_poubelle"]:
+            avertissement_vision = (
+                "La reconnaissance automatique n'a pas identifié de poubelle sur "
+                "cette photo. Le signalement est tout de même enregistré ; vérifiez "
+                "que la poubelle est bien visible pour de meilleurs résultats."
             )
 
         verdict_ia = res["verdict"]
@@ -811,6 +853,7 @@ def signaler(id_poubelle):
         return render_template_string(
             PAGE_MERCI, eval_citoyen=eval_citoyen, verdict_ia=verdict_ia,
             accord=accord, aff=LABEL_AFFICHAGE,
+            avertissement_vision=avertissement_vision,
         )
 
     return render_template_string(PAGE_SIGNALER, poubelle=poubelle)
@@ -853,7 +896,7 @@ def login():
 
 PAGE_LOGIN = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Connexion agents — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Connexion agents — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_AGENT__
   .center-screen{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem}
@@ -939,7 +982,7 @@ PAGE_REGISTER = """
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<title>Créer un compte — Visio</title>
+<title>Créer un compte — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 __THEME_AGENT__
@@ -1056,7 +1099,7 @@ input:focus{ outline:none; border-color:var(--signal) }
 # ====================== DASHBOARD AGENTS (Point 5) ======================
 PAGE_DASHBOARD = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Tableau de bord — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Tableau de bord — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -1083,12 +1126,18 @@ PAGE_DASHBOARD = """
   .risque{background:#ffffff0a;border-left:3px solid var(--moitie);border-radius:8px;padding:.55rem .8rem;margin:.35rem 0;color:var(--crayon)}
   .vide-msg{color:#8aa394;font-style:italic;font-size:.9rem}
   canvas{background:#ffffff0a;border-radius:12px;padding:.5rem}
+  .filtres{display:flex;gap:.4rem;margin:.3rem 0 .6rem}
+  .filtre-btn{padding:.35rem .8rem;border:1px solid #ffffff2a;border-radius:999px;
+    background:transparent;color:var(--brume);cursor:pointer;font-size:.82rem;transition:all .15s}
+  .filtre-btn:hover{border-color:var(--signal)}
+  .filtre-btn.actif{background:var(--signal);color:var(--foret);border-color:var(--signal);font-weight:700}
 </style></head>
 <body>
 <div class="wrap">
   <div class="topnav">
-    <div class="marque">Visio</div>
+    <div class="marque">ecoVisio</div>
     <div class="topnav-actions">
+      <a href="{{ url_for('accueil') }}">Accueil</a>
       <a href="{{ url_for('poubelles') }}">Poubelles</a>
       <a href="{{ url_for('admin_regles') }}">Configurer les règles</a>
       {% if session.get("role") == "admin" %}
@@ -1096,20 +1145,27 @@ PAGE_DASHBOARD = """
       <a href="{{ url_for('etiqueter') }}">Jeu de test</a>
       <a href="{{ url_for('evaluation_page') }}">Résultats</a>
       <a href="{{ url_for('calibration_page') }}">Calibration</a>
+      <a href="{{ url_for('verification_page') }}">Vérification</a>
       {% endif %}
       <a class="out" href="{{ url_for('logout') }}">Déconnexion</a>
     </div>
   </div>
 
   <h1>Tableau de bord</h1>
-  <p class="sous">État des poubelles publiques en temps réel, calculé à partir des derniers signalements.</p>
+  <p class="sous">État des poubelles publiques en temps réel, calculé à partir des derniers signalements.
+    <span id="live-indicateur" style="display:inline-flex;align-items:center;gap:.3rem;margin-left:.5rem;font-size:.82rem;color:var(--signal)">
+      <span style="width:8px;height:8px;border-radius:50%;background:var(--signal);display:inline-block;animation:pulse 2s infinite"></span>
+      <span id="live-texte">en direct</span>
+    </span>
+  </p>
+  <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}</style>
 
   <!-- Statistiques clés -->
   <div class="cartes">
-    <div class="stat rouge"><div class="n">{{ rep['pleine'] }}</div><div class="l">Pleines</div></div>
-    <div class="stat"><div class="n">{{ rep['vide'] }}</div><div class="l">Vides</div></div>
-    <div class="stat"><div class="n">{{ stats['total'] }}</div><div class="l">Signalements</div></div>
-    <div class="stat"><div class="n">{{ stats['taux_accord'] }}%</div><div class="l">Accord IA / citoyen</div></div>
+    <div class="stat rouge"><div class="n" id="kpi-pleine">{{ rep['pleine'] }}</div><div class="l">Pleines</div></div>
+    <div class="stat"><div class="n" id="kpi-vide">{{ rep['vide'] }}</div><div class="l">Vides</div></div>
+    <div class="stat"><div class="n" id="kpi-total">{{ stats['total'] }}</div><div class="l">Signalements</div></div>
+    <div class="stat"><div class="n" id="kpi-accord">{{ stats['taux_accord'] }}%</div><div class="l">Accord IA / citoyen</div></div>
   </div>
 
   <!-- Carte -->
@@ -1141,19 +1197,35 @@ PAGE_DASHBOARD = """
     </div>
 
     <div>
-      <!-- Graphique signalements par jour -->
+      <!-- Graphique signalements par jour (avec filtre de période dynamique) -->
       <h2 class="secttitle"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M3 3v18h18M7 14l3-3 3 3 5-6"/></svg> Signalements par jour</h2>
+      <div class="filtres" id="filtres-jours">
+        <button data-jours="7" class="filtre-btn">7 jours</button>
+        <button data-jours="14" class="filtre-btn actif">14 jours</button>
+        <button data-jours="30" class="filtre-btn">30 jours</button>
+      </div>
       <canvas id="chartJours" height="160"></canvas>
 
+      <!-- Graphique Chart.js dynamique : répartition pleine/vide (donut interactif) -->
       <h2 class="secttitle"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg> Répartition des statuts</h2>
-      <img src="{{ url_for('graphe_repartition') }}" alt="répartition" style="width:100%;max-width:340px;background:#fff;border-radius:12px;padding:.4rem">
+      <canvas id="chartRepartition" height="160"></canvas>
+
+      <!-- Version matplotlib (back-end), en complément -->
+      <p class="vide-msg" style="font-size:.8rem;margin-top:.8rem">Version générée côté serveur (matplotlib) :</p>
+      <img src="{{ url_for('graphe_repartition') }}" alt="répartition" style="width:100%;max-width:300px;background:#fff;border-radius:12px;padding:.4rem">
 
       <!-- Tableau récap -->
       <h2 class="secttitle"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M3 5h18M3 12h18M3 19h18"/></svg> Toutes les poubelles</h2>
-      <table>
+      <div class="filtres" id="filtres-statut">
+        <button data-statut="tous" class="filtre-btn actif">Toutes</button>
+        <button data-statut="pleine" class="filtre-btn">Pleines</button>
+        <button data-statut="vide" class="filtre-btn">Vides</button>
+        <button data-statut="inconnu" class="filtre-btn">Sans donnée</button>
+      </div>
+      <table id="table-poubelles">
         <tr><th>ID</th><th>Lieu</th><th>Statut</th></tr>
         {% for p in carte %}
-        <tr>
+        <tr data-statut="{{ p['statut'] if p['statut'] else 'inconnu' }}">
           <td>{{ p['id'] }}</td>
           <td>{{ p['nom_lieu'] }}</td>
           <td>
@@ -1220,22 +1292,45 @@ PAGE_DASHBOARD = """
       attribution: '© OpenStreetMap', maxZoom: 19
     }).addTo(map);
 
+    const marqueurs = [];  // garde une référence pour le filtrage
     poubelles.forEach(p => {
       const c = couleurs[p.statut] || couleurs[null];
-      L.circleMarker([p.latitude, p.longitude], {
+      const m = L.circleMarker([p.latitude, p.longitude], {
         radius: 10, fillColor: c, color: "#fff", weight: 2, fillOpacity: 0.9
       }).addTo(map).bindPopup(
         `<b>${p.id}</b><br>${p.nom_lieu}<br>Statut : ${labels[p.statut]||labels[null]}` +
         (p.derniere_maj ? `<br><small>Maj : ${p.derniere_maj}</small>` : "")
       );
+      marqueurs.push({ marker: m, statut: p.statut || 'inconnu' });
     });
 
-    // ---- Graphique signalements par jour ----
-    new Chart(document.getElementById('chartJours'), {
+    // ---- Filtre par statut : agit sur le tableau ET la carte, sans recharger ----
+    document.querySelectorAll('#filtres-statut .filtre-btn').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        document.querySelectorAll('#filtres-statut .filtre-btn').forEach(b=>b.classList.remove('actif'));
+        btn.classList.add('actif');
+        const choix = btn.dataset.statut;
+        // Tableau : montre/cache les lignes
+        document.querySelectorAll('#table-poubelles tr[data-statut]').forEach(function(tr){
+          tr.style.display = (choix === 'tous' || tr.dataset.statut === choix) ? '' : 'none';
+        });
+        // Carte : ajoute/retire les marqueurs
+        marqueurs.forEach(function(o){
+          const visible = (choix === 'tous' || o.statut === choix);
+          if(visible){ if(!map.hasLayer(o.marker)) o.marker.addTo(map); }
+          else { if(map.hasLayer(o.marker)) map.removeLayer(o.marker); }
+        });
+      });
+    });
+
+    // ---- Graphique signalements par jour (avec filtre de période) ----
+    // Données pré-calculées pour chaque période, fournies par le serveur
+    const donneesJours = {{ donnees_jours_json|safe }};
+    let chartJours = new Chart(document.getElementById('chartJours'), {
       type: 'bar',
       data: {
-        labels: {{ jours_dates|safe }},
-        datasets: [{ label: 'Signalements', data: {{ jours_comptes|safe }},
+        labels: donneesJours['14'].dates,
+        datasets: [{ label: 'Signalements', data: donneesJours['14'].comptes,
                      backgroundColor: '#7ed957', borderRadius: 4 }]
       },
       options: { plugins:{legend:{display:false}},
@@ -1244,6 +1339,52 @@ PAGE_DASHBOARD = """
           x:{ticks:{color:'#cfe3d4'},grid:{display:false}}
         } }
     });
+    // Filtre de période : met à jour le graphe sans recharger la page
+    document.querySelectorAll('#filtres-jours .filtre-btn').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        document.querySelectorAll('#filtres-jours .filtre-btn').forEach(b=>b.classList.remove('actif'));
+        btn.classList.add('actif');
+        const d = donneesJours[btn.dataset.jours];
+        chartJours.data.labels = d.dates;
+        chartJours.data.datasets[0].data = d.comptes;
+        chartJours.update();
+      });
+    });
+
+    // ---- Graphique répartition pleine/vide (donut interactif Chart.js) ----
+    window._chartRepartition = new Chart(document.getElementById('chartRepartition'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Vides', 'Pleines'],
+        datasets: [{
+          data: [{{ rep['vide'] }}, {{ rep['pleine'] }}],
+          backgroundColor: ['#2e8b57', '#e0573e'],
+          borderColor: '#14352a', borderWidth: 2
+        }]
+      },
+      options: { plugins:{legend:{labels:{color:'#cfe3d4'}}} }
+    });
+
+    // ---- Rafraîchissement automatique (AJAX) : effet "temps réel" ----
+    // Toutes les 30 secondes, on redemande les stats au serveur et on met à jour
+    // les indicateurs sans recharger la page (polling AJAX, léger et simple).
+    async function rafraichirStats(){
+      try {
+        const rep = await fetch('{{ url_for("dashboard_stats_json") }}');
+        if(!rep.ok) return;
+        const d = await rep.json();
+        document.getElementById('kpi-pleine').textContent = d.pleine;
+        document.getElementById('kpi-vide').textContent = d.vide;
+        document.getElementById('kpi-total').textContent = d.total;
+        document.getElementById('kpi-accord').textContent = d.taux_accord + '%';
+        document.getElementById('live-texte').textContent = 'mis à jour à ' + d.horodatage;
+        if(window._chartRepartition){
+          window._chartRepartition.data.datasets[0].data = [d.vide, d.pleine];
+          window._chartRepartition.update();
+        }
+      } catch(e){ /* erreur réseau ignorée, on réessaie au prochain cycle */ }
+    }
+    setInterval(rafraichirStats, 30000);  // toutes les 30 secondes
   </script>
 </body></html>
 """
@@ -1258,7 +1399,11 @@ def dashboard():
     stats = compter_signalements()
     pleines = poubelles_pleines(n=5)
     risques = zones_a_risque(seuil_taux=0.4, mini_signalements=3)
-    jours_dates, jours_comptes = signalements_par_jour(14)
+    # Données pré-calculées pour le filtre de période (7 / 14 / 30 jours)
+    donnees_jours = {}
+    for nb in (7, 14, 30):
+        d, comptes = signalements_par_jour(nb)
+        donnees_jours[str(nb)] = {"dates": d, "comptes": comptes}
     corr_jour = correlation_jour_semaine()
     corr_meteo = correlation_meteo()
 
@@ -1270,12 +1415,31 @@ def dashboard():
         stats=stats,
         pleines=pleines,
         risques=risques,
-        jours_dates=_json.dumps(jours_dates),
-        jours_comptes=_json.dumps(jours_comptes),
+        donnees_jours_json=_json.dumps(donnees_jours),
         corr_jour=corr_jour,
         corr_meteo=corr_meteo,
         aff=LABEL_AFFICHAGE,
     )
+
+
+@app.route("/dashboard/stats.json")
+@login_requis
+def dashboard_stats_json():
+    """
+    Renvoie les statistiques courantes au format JSON, pour le rafraîchissement
+    automatique du tableau de bord (AJAX) sans recharger la page.
+    """
+    rep = repartition_statuts(n=5)
+    stats = compter_signalements()
+    pleines = poubelles_pleines(n=5)
+    return jsonify({
+        "vide": rep["vide"],
+        "pleine": rep["pleine"],
+        "total": stats["total"],
+        "taux_accord": stats["taux_accord"],
+        "nb_pleines": len(pleines),
+        "horodatage": datetime.now().strftime("%H:%M:%S"),
+    })
 
 
 # ====================== ADMIN : RÈGLES CONFIGURABLES (Point niveau 2-3) ======================
@@ -1307,7 +1471,8 @@ PAGE_ADMIN_REGLES = """
 <body>
 <div class="wrap">
   <div class="topnav">
-    <div class="marque">Visio</div>
+    <div class="marque">ecoVisio</div>
+    <a href="{{ url_for('accueil') }}">Accueil</a>
     <a href="{{ url_for('dashboard') }}">Retour au tableau de bord</a>
   </div>
   <h1>Règles de classification</h1>
@@ -1459,7 +1624,7 @@ DOSSIER_JEU_TEST = "jeu_de_test"
 
 PAGE_ETIQUETER = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Jeu de test — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Jeu de test — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_AGENT__
   .wrap{max-width:720px}
@@ -1476,12 +1641,18 @@ PAGE_ETIQUETER = """
   .fini{text-align:center;padding:2rem}
   .fini .big{font-size:2rem;color:var(--signal);font-weight:800}
   code{background:#ffffff14;padding:.1rem .4rem;border-radius:4px}
+  .kbd{display:inline-block;background:#ffffff22;border:1px solid #ffffff33;border-radius:5px;
+    padding:.05rem .4rem;font-size:.8rem;font-weight:700;margin-left:.3rem}
+  .aide-clavier{color:var(--brume);font-size:.82rem;text-align:center;margin-top:.8rem}
+  .meta-survol{color:var(--brume);font-size:.82rem;text-align:center;min-height:1.1rem;
+    background:#ffffff0a;border-radius:8px;padding:.4rem;margin-bottom:.6rem}
 </style></head>
 <body>
 <div class="wrap">
   <div class="topnav">
-    <div class="marque">Visio</div>
-    <div><a href="{{ url_for('evaluation_page') }}">Voir les résultats</a> &nbsp;
+    <div class="marque">ecoVisio</div>
+    <div><a href="{{ url_for('accueil') }}">Accueil</a> &nbsp;
+         <a href="{{ url_for('evaluation_page') }}">Voir les résultats</a> &nbsp;
          <a href="{{ url_for('dashboard') }}">Tableau de bord</a></div>
   </div>
 
@@ -1492,13 +1663,18 @@ PAGE_ETIQUETER = """
   {% if item %}
     <div class="compteur">{{ stats['etiquetes'] }} / {{ stats['total'] }} photos étiquetées</div>
     <div class="progress"><div style="width: {{ pourcentage }}%"></div></div>
-    <img class="photo" src="{{ url_for('image_jeu_test', item_id=item['id']) }}" alt="photo test">
-    <form method="post" action="{{ url_for('etiqueter_post', item_id=item['id']) }}">
+    <img class="photo" id="photo-courante"
+         src="{{ url_for('image_jeu_test', item_id=item['id']) }}" alt="photo test"
+         title="{{ item['chemin_image'] }}">
+    <div class="meta-survol" id="meta-survol">Survolez l'image pour voir ses métadonnées</div>
+    <form method="post" action="{{ url_for('etiqueter_post', item_id=item['id']) }}" id="form-etiquette">
       <div class="niveaux">
-        <button class="lv" name="label" value="vide">Vide</button>
-        <button class="lp" name="label" value="pleine">Pleine</button>
+        <button class="lv" name="label" value="vide">Vide <span class="kbd">V</span></button>
+        <button class="lp" name="label" value="pleine">Pleine <span class="kbd">P</span></button>
       </div>
     </form>
+    <p class="aide-clavier">Raccourcis clavier : <span class="kbd">V</span> pour Vide,
+      <span class="kbd">P</span> pour Pleine</p>
   {% else %}
     <div class="carte fini">
       {% if stats['total'] == 0 %}
@@ -1516,8 +1692,43 @@ PAGE_ETIQUETER = """
   <form method="post" action="{{ url_for('importer_jeu_test') }}" style="margin-top:1.5rem">
     <button class="btn btn-s" type="submit">Importer les photos du dossier {{ dossier }}/</button>
   </form>
+  <form method="post" action="{{ url_for('vider_jeu_test_route') }}" style="margin-top:.6rem"
+        onsubmit="return confirm('Vider tout le jeu de test ? Les photos enregistrées et leurs étiquettes seront supprimées de la base (le dossier n\'est pas touché). Vous pourrez réimporter ensuite.');">
+    <button class="btn" type="submit"
+            style="background:#7a2e26;color:#fff;border:1px solid #b04a3e">Vider le jeu de test</button>
+  </form>
+  <p class="vide-msg" style="font-size:.82rem;margin-top:.4rem">
+    Utilisez « Vider » si vous avez changé le contenu du dossier {{ dossier }}/ :
+    videz, puis réimportez pour resynchroniser.</p>
   {% if message %}<p style="color:var(--signal)">{{ message }}</p>{% endif %}
 </div>
+<script>
+  // Raccourcis clavier : V = vide, P = pleine
+  document.addEventListener('keydown', function(e){
+    const form = document.getElementById('form-etiquette');
+    if(!form) return;
+    const k = e.key.toLowerCase();
+    if(k === 'v' || k === 'p'){
+      const val = (k === 'v') ? 'vide' : 'pleine';
+      const btn = form.querySelector('button[value="'+val+'"]');
+      if(btn) btn.click();
+    }
+  });
+  // Métadonnées au survol de l'image (dimensions réelles + nom de fichier)
+  const img = document.getElementById('photo-courante');
+  const meta = document.getElementById('meta-survol');
+  if(img && meta){
+    function maj(){
+      const nom = (img.title || '').split(/[\\\\/]/).pop();
+      meta.textContent = 'Image : ' + nom + '  —  ' + img.naturalWidth + '×' + img.naturalHeight + ' px';
+    }
+    img.addEventListener('mouseenter', maj);
+    img.addEventListener('mouseleave', function(){
+      meta.textContent = 'Survolez l\\'image pour voir ses métadonnées';
+    });
+    if(img.complete) maj();
+  }
+</script>
 </body></html>
 """
 
@@ -1540,6 +1751,19 @@ def etiqueter_post(item_id):
     label = request.form.get("label")
     if label in LABELS_VALIDES:
         etiqueter_jeu_test(item_id, label)
+        # On extrait les caractéristiques maintenant (une seule fois) et on les met
+        # en cache, pour que la page Résultats n'ait plus à réanalyser les photos.
+        import json as _json
+        from vision import extraire_caracteristiques
+        for it in lister_jeu_test():
+            if it["id"] == item_id:
+                if os.path.exists(it["chemin_image"]):
+                    try:
+                        feats = extraire_caracteristiques(it["chemin_image"])
+                        cacher_analyse_jeu_test(item_id, _json.dumps(feats, ensure_ascii=False), None)
+                    except Exception:
+                        pass
+                break
     return redirect(url_for("etiqueter"))
 
 
@@ -1549,6 +1773,16 @@ def importer_jeu_test():
     os.makedirs(DOSSIER_JEU_TEST, exist_ok=True)
     n = importer_images_jeu_test(DOSSIER_JEU_TEST)
     return redirect(url_for("etiqueter", msg=f"{n} nouvelle(s) photo(s) importée(s)."))
+
+
+@app.route("/evaluation/vider", methods=["POST"])
+@login_requis
+def vider_jeu_test_route():
+    """Vide entièrement le jeu de test (photos enregistrées + étiquettes + cache).
+    Utile quand on a changé le contenu du dossier jeu_de_test et qu'on veut
+    resynchroniser la base avec le dossier actuel."""
+    vider_jeu_test()
+    return redirect(url_for("etiqueter", msg="Jeu de test vidé. Cliquez sur « Importer » pour recharger le dossier."))
 
 
 @app.route("/evaluation/image/<int:item_id>")
@@ -1564,7 +1798,7 @@ def image_jeu_test(item_id):
 # ====================== PAGE RÉSULTATS / MÉTRIQUES ======================
 PAGE_EVALUATION = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Résultats — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Résultats — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_AGENT__
   .topnav{display:flex;justify-content:space-between;align-items:center;padding:1.4rem 0;border-bottom:1px solid #ffffff14}
@@ -1588,8 +1822,9 @@ PAGE_EVALUATION = """
 <body>
 <div class="wrap">
   <div class="topnav">
-    <div class="marque">Visio</div>
+    <div class="marque">ecoVisio</div>
     <div>
+      <a href="{{ url_for('accueil') }}">Accueil</a>
       <a href="{{ url_for('etiqueter') }}">Étiqueter</a>
       <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
     </div>
@@ -1646,9 +1881,13 @@ PAGE_EVALUATION = """
       montrent les confusions à corriger en ajustant les seuils dans la configuration des règles.
     </div>
 
-    <h2 class="secttitle"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> Visualisation (générée côté serveur)</h2>
-    <p class="vide-msg" style="font-size:.85rem">Graphe PNG produit avec matplotlib, en complément du tableau interactif.</p>
-    <img src="{{ url_for('graphe_matrice') }}" alt="matrice de confusion" style="max-width:480px;background:#fff;border-radius:12px;padding:.5rem">
+    <h2 class="secttitle"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> Visualisations (générées côté serveur, matplotlib)</h2>
+    <p class="vide-msg" style="font-size:.85rem">Graphes PNG produits avec matplotlib, en complément des graphes interactifs.</p>
+    <div style="display:flex;flex-wrap:wrap;gap:1rem">
+      <img src="{{ url_for('graphe_matrice') }}" alt="matrice de confusion" style="max-width:440px;width:100%;background:#fff;border-radius:12px;padding:.5rem">
+      <img src="{{ url_for('graphe_nuage') }}" alt="séparation des classes" style="max-width:440px;width:100%;background:#fff;border-radius:12px;padding:.5rem">
+      <img src="{{ url_for('graphe_contraste') }}" alt="distribution du contraste" style="max-width:440px;width:100%;background:#fff;border-radius:12px;padding:.5rem">
+    </div>
   {% endif %}
 </div>
 </body></html>
@@ -1669,7 +1908,7 @@ DOSSIER_QR = "qrcodes"
 
 PAGE_POUBELLES = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Poubelles — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Poubelles — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_AGENT__
   .topnav{display:flex;justify-content:space-between;align-items:center;padding:1.4rem 0;border-bottom:1px solid #ffffff14}
@@ -1697,8 +1936,9 @@ PAGE_POUBELLES = """
 <body>
 <div class="wrap">
   <div class="topnav">
-    <div class="marque">Visio</div>
+    <div class="marque">ecoVisio</div>
     <div>
+      <a href="{{ url_for('accueil') }}">Accueil</a>
       <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
       <a href="{{ url_for('admin_regles') }}">Règles</a>
     </div>
@@ -1917,10 +2157,46 @@ def graphe_tailles():
     return send_file(buf, mimetype="image/png")
 
 
+@app.route("/graphe/nuage-classes.png")
+@login_requis
+def graphe_nuage():
+    """Nuage de points contours vs texture, par classe (jeu de test étiqueté)."""
+    import json as _json
+    from database import lister_jeu_test
+    points = {"vide": [], "pleine": []}
+    for it in lister_jeu_test():
+        if it["vrai_label"] in points and it["features_json"]:
+            try:
+                f = _json.loads(it["features_json"])
+                points[it["vrai_label"]].append((f["densite_contours"], f["texture"]))
+            except (ValueError, TypeError, KeyError):
+                pass
+    buf = graphiques.nuage_contours_texture_png(points)
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/graphe/contraste.png")
+@login_requis
+def graphe_contraste():
+    """Distribution du contraste par classe (jeu de test étiqueté)."""
+    import json as _json
+    from database import lister_jeu_test
+    contrastes = {"vide": [], "pleine": []}
+    for it in lister_jeu_test():
+        if it["vrai_label"] in contrastes and it["features_json"]:
+            try:
+                f = _json.loads(it["features_json"])
+                contrastes[it["vrai_label"]].append(f["contraste"])
+            except (ValueError, TypeError, KeyError):
+                pass
+    buf = graphiques.distribution_contraste_png(contrastes)
+    return send_file(buf, mimetype="image/png")
+
+
 # ====================== CALIBRATION AUTOMATIQUE DES SEUILS ======================
 PAGE_CALIBRATION = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Calibration — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Calibration — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_AGENT__
   .topnav{display:flex;justify-content:space-between;align-items:center;padding:1.4rem 0;border-bottom:1px solid #ffffff14}
@@ -1939,8 +2215,10 @@ PAGE_CALIBRATION = """
 <body>
 <div class="wrap">
   <div class="topnav">
-    <div class="marque">Visio</div>
+    <div class="marque">ecoVisio</div>
     <div>
+      <a href="{{ url_for('accueil') }}">Accueil</a>
+      <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
       <a href="{{ url_for('etiqueter') }}">Jeu de test</a>
       <a href="{{ url_for('evaluation_page') }}">Résultats</a>
       <a href="{{ url_for('admin_regles') }}">Règles</a>
@@ -1960,24 +2238,44 @@ PAGE_CALIBRATION = """
     <div class="bloc">
       <h2>Mesures par classe ({{ r['total'] }} images : {{ r['comptes']['vide'] }} vides,
         {{ r['comptes']['pleine'] }} pleines)</h2>
+      <p class="vide-msg" style="font-size:.85rem">Pour chaque critère : sa valeur moyenne dans
+        chaque classe, et un score de <b>séparabilité</b> (plus il est élevé, mieux le critère
+        distingue vide de pleine). Un critère qui sépare bien est un bon candidat pour une règle.</p>
       <table class="mc">
-        <tr><th>Classe</th><th>Densité contours (moy)</th><th>Texture (moy)</th><th>Nb images</th></tr>
-        {% for c in ['vide','pleine'] %}
         <tr>
-          <td><span class="badge b_{{ c }}">{{ aff[c] }}</span></td>
-          <td>{{ r['stats'][c]['densite_contours']['moyenne'] if r['stats'][c]['densite_contours'] else '—' }}</td>
-          <td>{{ r['stats'][c]['texture']['moyenne'] if r['stats'][c]['texture'] else '—' }}</td>
-          <td>{{ r['comptes'][c] }}</td>
+          <th>Critère</th>
+          <th>Vide (moy)</th>
+          <th>Pleine (moy)</th>
+          <th>Sépare bien ?</th>
+        </tr>
+        {% for crit, libelle in r['criteres'].items() %}
+        <tr {% if crit == r['meilleur_critere'] %}style="background:#1f4a3355"{% endif %}>
+          <td style="text-align:left">{{ libelle }}
+            {% if crit == r['meilleur_critere'] %}<span style="color:var(--signal)">★</span>{% endif %}
+          </td>
+          <td>{{ r['stats']['vide'][crit]['moyenne'] if r['stats']['vide'][crit] else '—' }}</td>
+          <td>{{ r['stats']['pleine'][crit]['moyenne'] if r['stats']['pleine'][crit] else '—' }}</td>
+          <td>
+            {% set sc = r['separabilite'][crit]['score'] %}
+            {% if sc >= 0.5 %}<span style="color:var(--signal);font-weight:700">oui</span>
+            {% else %}<span style="color:#c98">faible</span>{% endif %}
+            <span class="vide-msg">({{ sc }})</span>
+          </td>
         </tr>
         {% endfor %}
       </table>
+      {% if r['meilleur_critere'] %}
+      <p style="margin-top:.6rem;font-size:.9rem">★ Critère le plus discriminant :
+        <b>{{ r['criteres'][r['meilleur_critere']] }}</b> — c'est le meilleur candidat
+        pour construire une règle de classification.</p>
+      {% endif %}
 
       {% for a in r['avertissements'] %}<div class="avert">{{ a }}</div>{% endfor %}
 
       <div class="prop">
         <b>Seuils proposés :</b><br>
         {% for k, v in r['seuils_proposes'].items() %}
-          <code>{{ k }} = {{ v if v is not none else 'non calculable' }}</code><br>
+          {% if v is not none %}<code>{{ k }} = {{ v }}</code><br>{% endif %}
         {% endfor %}
       </div>
 
@@ -2019,7 +2317,7 @@ def appliquer_calibration():
 # ====================== PAGE CARACTÉRISTIQUES EXTRAITES ======================
 PAGE_CARACTERISTIQUES = """
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Caractéristiques — Visio</title>
+<html lang="fr"><head><meta charset="utf-8"><title>Caractéristiques — ecoVisio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>__THEME_AGENT__
   .topnav{display:flex;justify-content:space-between;align-items:center;padding:1.4rem 0;border-bottom:1px solid #ffffff14}
@@ -2036,8 +2334,12 @@ PAGE_CARACTERISTIQUES = """
   .feat .v{font-weight:700;color:var(--crayon)}
   .entete{display:flex;align-items:center;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap}
   .swatch{width:20px;height:20px;border-radius:4px;border:1px solid #ffffff33;display:inline-block;vertical-align:middle}
-  .histo{display:flex;align-items:flex-end;gap:2px;height:34px;margin-top:.2rem}
-  .histo .bar{flex:1;background:var(--signal);border-radius:1px 1px 0 0;min-height:1px}
+  .histo{display:flex;align-items:flex-end;gap:2px;height:44px;margin-top:.2rem;
+    background:#ffffff12;border:1px solid #ffffff1a;border-radius:6px;padding:3px}
+  .histo .bar{flex:1;border-radius:1px 1px 0 0;min-height:1px;border:1px solid #00000040}
+  .histo-legende{display:flex;justify-content:space-between;margin-top:.25rem;
+    font-size:.7rem;color:var(--brume)}
+  .histo-legende span:nth-child(2){opacity:.7}
   .vide-msg{color:#8aa394}
   .pagin{display:flex;gap:.5rem;justify-content:center;margin:1.5rem 0}
   .pagin a{padding:.4rem .9rem;background:#ffffff0a;border:1px solid #ffffff1a;border-radius:8px;
@@ -2048,8 +2350,9 @@ PAGE_CARACTERISTIQUES = """
 <body>
 <div class="wrap">
   <div class="topnav">
-    <div class="marque">Visio</div>
+    <div class="marque">ecoVisio</div>
     <div>
+      <a href="{{ url_for('accueil') }}">Accueil</a>
       <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
       <a href="{{ url_for('evaluation_page') }}">Résultats</a>
     </div>
@@ -2086,14 +2389,28 @@ PAGE_CARACTERISTIQUES = """
           <div class="feat"><div class="k">Contraste</div><div class="v">{{ f.get('contraste') }}</div></div>
           <div class="feat"><div class="k">Densité contours</div><div class="v">{{ f.get('densite_contours') }}</div></div>
           <div class="feat"><div class="k">Texture</div><div class="v">{{ f.get('texture') }}</div></div>
+          {% if f.get('densite_contours_bas') is not none %}
+          <div class="feat"><div class="k">Contours au sol</div><div class="v">{{ f.get('densite_contours_bas') }}</div></div>
+          <div class="feat"><div class="k">Taches claires (sol)</div><div class="v">{{ f.get('taches_claires_bas') }}</div></div>
+          <div class="feat"><div class="k">Diversité couleurs</div><div class="v">{{ f.get('diversite_couleurs') }}</div></div>
+          {% endif %}
         </div>
         {% if f.get('histogramme_luminance') %}
         <div class="feat" style="margin-top:.6rem">
           <div class="k">Histogramme de luminance</div>
           <div class="histo">
             {% for v in f['histogramme_luminance'] %}
-              <div class="bar" style="height:{{ v }}%" title="{{ v }}%"></div>
+              {# Niveau de gris correspondant à la tranche : de sombre (gauche) à clair (droite) #}
+              {% set gris = (loop.index0 * 255 // 7) %}
+              <div class="bar"
+                   style="height:{{ v }}%;background:rgb({{ gris }},{{ gris }},{{ gris }})"
+                   title="Tranche {{ loop.index }}/8 — {{ v }}% des pixels"></div>
             {% endfor %}
+          </div>
+          <div class="histo-legende">
+            <span>← sombre</span>
+            <span>luminosité des pixels</span>
+            <span>clair →</span>
           </div>
         </div>
         {% endif %}
@@ -2152,6 +2469,87 @@ def caracteristiques():
     return render_template_string(
         PAGE_CARACTERISTIQUES, signalements=signalements, page=page,
         pages_total=pages_total, aff=LABEL_AFFICHAGE,
+    )
+
+
+# ====================== VÉRIFICATION DE LA CONFORMITÉ DES DONNÉES ======================
+PAGE_VERIFICATION = """
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Vérification des données — ecoVisio</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>__THEME_AGENT__
+  .topnav{display:flex;justify-content:space-between;align-items:center;padding:1.4rem 0;border-bottom:1px solid #ffffff14}
+  .topnav .marque{font-weight:800;letter-spacing:.2em;text-transform:uppercase;color:var(--signal)}
+  .topnav a{color:var(--brume);text-decoration:none;font-size:.9rem;margin-left:1.2rem}
+  .topnav a:hover{color:var(--signal)}
+  .bilan{display:flex;align-items:center;gap:1rem;background:#ffffff0a;border:1px solid #ffffff1a;
+    border-radius:14px;padding:1.3rem;margin:1.5rem 0}
+  .bilan .pastille{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none}
+  .bilan.ok .pastille{background:#1f4a33}.bilan.ko .pastille{background:#4a221f}
+  .bilan .pastille svg{width:26px;height:26px}
+  .bilan.ok .pastille svg{stroke:var(--signal)}.bilan.ko .pastille svg{stroke:#ff9a8a}
+  .bilan .txt b{font-size:1.1rem}
+  .cat{background:#ffffff0a;border:1px solid #ffffff1a;border-radius:12px;padding:1rem;margin:.8rem 0}
+  .cat .entete{display:flex;align-items:center;justify-content:space-between;cursor:default}
+  .cat h3{margin:0;font-size:1rem}
+  .badge-ok{background:var(--vide);color:#fff;padding:.15rem .6rem;border-radius:999px;font-size:.78rem;font-weight:700}
+  .badge-ko{background:var(--pleine);color:#fff;padding:.15rem .6rem;border-radius:999px;font-size:.78rem;font-weight:700}
+  .cat ul{margin:.6rem 0 0;padding-left:1.2rem;color:#f0b8ae}
+  .cat li{margin:.2rem 0;font-size:.9rem}
+</style></head>
+<body>
+<div class="wrap">
+  <div class="topnav">
+    <div class="marque">ecoVisio</div>
+    <div>
+      <a href="{{ url_for('accueil') }}">Accueil</a>
+      <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
+    </div>
+  </div>
+
+  <h1>Vérification de la conformité des données</h1>
+  <p class="sous">Audit d'intégrité de la base : cohérence des liens, présence des fichiers,
+    validité des valeurs et complétude des caractéristiques stockées.</p>
+
+  {% if total == 0 %}
+    <div class="bilan ok">
+      <div class="pastille"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg></div>
+      <div class="txt"><b>Aucune anomalie détectée</b><br>
+        <span class="sous">Toutes les données stockées sont conformes.</span></div>
+    </div>
+  {% else %}
+    <div class="bilan ko">
+      <div class="pastille"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 13.8A2 2 0 004 21h16a2 2 0 001.7-3.3l-8-13.8a2 2 0 00-3.4 0z"/></svg></div>
+      <div class="txt"><b>{{ total }} anomalie(s) détectée(s)</b><br>
+        <span class="sous">Détail par catégorie ci-dessous.</span></div>
+    </div>
+  {% endif %}
+
+  {% for categorie, problemes in rapport.items() %}
+  <div class="cat">
+    <div class="entete">
+      <h3>{{ categorie }}</h3>
+      {% if problemes %}<span class="badge-ko">{{ problemes|length }}</span>
+      {% else %}<span class="badge-ok">OK</span>{% endif %}
+    </div>
+    {% if problemes %}
+    <ul>
+      {% for p in problemes %}<li>{{ p }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+</body></html>
+"""
+
+
+@app.route("/verification")
+@login_requis
+def verification_page():
+    res = lancer_verification_complete()
+    return render_template_string(
+        PAGE_VERIFICATION, rapport=res["rapport"], total=res["total_problemes"],
     )
 
 
