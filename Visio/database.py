@@ -556,6 +556,28 @@ def ajouter_signalement(poubelle_id, chemin_image, eval_citoyen,
     return sig_id
 
 
+def marquer_poubelle_videe(poubelle_id):
+    """
+    Enregistre une COLLECTE : la poubelle vient d'être vidée par un agent.
+
+    On crée un signalement spécial "vide" horodaté (sans photo), qui compte comme
+    le signalement le plus récent. Comme le statut de la poubelle est calculé à
+    partir des derniers signalements, la poubelle repasse ainsi naturellement à
+    "vide", tout en gardant une trace datée de la collecte dans l'historique.
+
+    Retourne l'id du signalement de collecte créé.
+    """
+    return ajouter_signalement(
+        poubelle_id=poubelle_id,
+        chemin_image="",            # pas de photo pour une collecte
+        eval_citoyen="collecte",    # marqueur : action d'agent, pas un citoyen
+        verdict_ia="vide",
+        statut="vide",
+        accord=1,
+        features_json="{}",
+    )
+
+
 def get_signalement(signalement_id):
     """Retourne un signalement (avec le nom du lieu de sa poubelle)."""
     conn = get_connection()
@@ -594,6 +616,16 @@ def calculer_statut(rows):
     """
     if not rows:
         return None
+
+    # Règle prioritaire : si le signalement le plus récent est une COLLECTE
+    # (poubelle vidée par un agent), la poubelle est "vide", quel que soit
+    # l'historique. Une collecte prime sur les anciens signalements citoyens.
+    plus_recent = rows[0]
+    try:
+        if plus_recent["eval_citoyen"] == "collecte":
+            return "vide"
+    except (KeyError, IndexError):
+        pass
 
     votes = {}
     for r in rows:

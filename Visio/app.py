@@ -29,6 +29,7 @@ from flask import (
 from database import (
     init_db, get_poubelle, lister_poubelles, ajouter_signalement,
     desactiver_poubelle, reactiver_poubelle,
+    marquer_poubelle_videe,
     ajouter_poubelle,verifier_compte,creer_compte,
     LABELS_VALIDES, LABEL_AFFICHAGE,
     verifier_limite, enregistrer_tentative, nettoyer_vieilles_tentatives,
@@ -1997,6 +1998,10 @@ PAGE_POUBELLES = """
         <td><a href="{{ url_for('qr_poubelle', poubelle_id=p['id']) }}" download>Télécharger</a></td>
         <td>
           {% if p['active'] %}
+          <form method="post" action="{{ url_for('vider_poubelle_post', poubelle_id=p['id']) }}"
+                style="display:inline" onsubmit="return confirm('Confirmer que la poubelle {{ p['id'] }} a été vidée ? Elle repassera au statut « vide ».');">
+            <button class="btn vert" type="submit">Marquer comme vidée</button>
+          </form>
           <form method="post" action="{{ url_for('desactiver_poubelle_post', poubelle_id=p['id']) }}"
                 style="display:inline" onsubmit="return confirm('Désactiver la poubelle {{ p['id'] }} ? Elle sera masquée mais son historique sera conservé.');">
             <button class="btn rouge" type="submit">Désactiver</button>
@@ -2051,6 +2056,16 @@ def reactiver_poubelle_post(poubelle_id):
         abort(404)
     reactiver_poubelle(poubelle_id)
     return redirect(url_for("poubelles", msg=f"Poubelle {poubelle_id} réactivée."))
+
+
+@app.route("/poubelles/<poubelle_id>/vider", methods=["POST"])
+@login_requis
+def vider_poubelle_post(poubelle_id):
+    """Marque une poubelle comme vidée par un agent (signalement de collecte)."""
+    if get_poubelle(poubelle_id) is None:
+        abort(404)
+    marquer_poubelle_videe(poubelle_id)
+    return redirect(url_for("poubelles", msg=f"Poubelle {poubelle_id} marquée comme vidée."))
 
 
 @app.route("/poubelles/ajouter", methods=["POST"])
